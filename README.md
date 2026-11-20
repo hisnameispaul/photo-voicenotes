@@ -90,10 +90,33 @@ uv run photo-voicenotes-transcribe                 # most recent session
 uv run photo-voicenotes-transcribe path/to/session --language en
 ```
 
-This writes `transcript.json` and `photos.csv` into the session folder. The CSV has two
-columns, `filename` and `description`, with one row per photo shown in viewing order;
-photos shown but not described get an empty description. When each photo was shown is kept
-in the session's `events.jsonl`.
+This writes into the session folder:
+
+- `photos.csv`: two columns, `filename` and `description`, with one row per photo shown in
+  viewing order; photos shown but not described get an empty description
+- `photos-as-heard.csv`: the same, with Whisper's text before any name corrections
+- `corrections.txt`: which words were respelled, and in which photos
+- `transcript.json`: Whisper's full output, with word timings
+
+When each photo was shown is kept in the session's `events.jsonl`.
+
+### Names and places
+
+Whisper writes what it hears, so "Bramleys" can come out as "Branley's". Under right-click →
+**Names and places…** you can list family names, places and other words, one per line, spelled
+as you want them. After each transcription, any word or phrase that closely resembles an entry
+is respelled to match, and the app shows what it changed, e.g. `Branley's → Bramleys (034, 035)`.
+
+- The list is shared by all folders and kept in the app's data folder as `names.txt`.
+- Entries shorter than 5 letters are ignored, as they would match too many ordinary words
+  ("Rose" and "prose").
+- A possessive is kept: with "Grandpa" in the list, "Grandpa's" is left as it is.
+- Ordinary words close to a listed name can be respelled too (with "Bramleys" listed,
+  "bramlets" would be), so check `corrections.txt`; Whisper's own text stays in
+  `photos-as-heard.csv`.
+- After editing the list, right-click → **Apply names list to last recording** updates that
+  recording's CSV without transcribing it again. From the command line,
+  `photo-voicenotes-transcribe <session>` does the same for any session.
 
 Words are matched to photos using Whisper's word timings. People often press "next"
 before finishing a sentence, so when a photo change lands mid-sentence, the rest of that

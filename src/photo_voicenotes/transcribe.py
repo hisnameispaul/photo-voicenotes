@@ -10,12 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from photo_voicenotes.align import Event, PhotoNotes, align
+from photo_voicenotes.corrections import Correction, correct, summary
 from photo_voicenotes.models import DownloadError, download, selected_model
 from photo_voicenotes.paths import sessions_dir
+from photo_voicenotes.vocabulary import load_names
 from photo_voicenotes.whisper import WhisperError, find_model, find_whisper, read_words, transcribe
 
 TRANSCRIPT = "transcript.json"
 CSV_NAME = "photos.csv"
+HEARD_CSV_NAME = "photos-as-heard.csv"  # Whisper's text before name corrections
+CORRECTIONS_NAME = "corrections.txt"
 CSV_COLUMNS = ["filename", "description"]
 
 
@@ -24,6 +28,7 @@ class CsvResult:
     path: Path
     photos: int
     described: int
+    corrections: list[Correction]
 
 
 def latest_session() -> Path | None:
@@ -45,25 +50,48 @@ def load_session(folder: Path) -> tuple[dict, list[Event]]:
     return metadata, events
 
 
-def write_csv(path: Path, notes: list[PhotoNotes]) -> None:
+def write_csv(path: Path, rows: list[tuple[str, str]]) -> None:
     # utf-8-sig so Excel recognises the encoding; LibreOffice and others ignore the marker.
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()
-        for note in notes:
-            writer.writerow({"filename": note.image, "description": note.description})
+        for image, description in rows:
+            writer.writerow({"filename": image, "description": description})
 
 
-def session_csv(folder: Path, output: Path | None = None) -> CsvResult:
-    """Match a session's existing transcript to its photos and write the CSV."""
+def write_corrections(path: Path, corrections: list[Correction]) -> None:
+    lines = [f"{c.heard} → {c.corrected}: {', '.join(c.images)}" for c in corrections]
+    path.write_text("\n".join(lines or ["No corrections were needed."]) + "\n", encoding="utf-8")
+
+
+def session_csv(folder: Path, output: Path | None = None, names: list[str] | None = None) -> CsvResult:
+    """Match a session's existing transcript to its photos, correct the spelling of names
+    from the names list, and write the CSVs. Always starts again from Whisper's transcript,
+    so it can be re-run after the names list changes."""
     metadata, events = load_session(folder)
     if not events:
         raise ValueError(f"{folder} has no photo events")
     duration = metadata.get("duration") or max(e.t for e in events)
     notes = align(events, read_words(folder / TRANSCRIPT), duration)
+    names = load_names() if names is None else names
+
+    heard, corrected = [], []
+    found: dict[tuple[str, str], Correction] = {}
+    for note in notes:
+        text, changes = correct(note.description, names)
+        heard.append((note.image, note.description))
+        corrected.append((note.image, text))
+        for before, after in changes:
+            entry = found.setdefault((before, after), Correction(before, after))
+            if note.image not in entry.images:
+                entry.images.append(note.image)
+
     output = output or folder / CSV_NAME
-    write_csv(output, notes)
-    return CsvResult(output, len(notes), sum(1 for n in notes if n.description))
+    write_csv(output, corrected)
+    write_csv(folder / HEARD_CSV_NAME, heard)
+    corrections = list(found.values())
+    write_corrections(folder / CORRECTIONS_NAME, corrections)
+    return CsvResult(output, len(notes), sum(1 for n in notes if n.description), corrections)
 
 
 def _print_download_progress(done: int, total: int) -> None:
@@ -77,7 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", type=Path, help="Whisper ggml model file (default: the app's selected model)")
     parser.add_argument("--whisper", type=Path, help="path to whisper.cpp's whisper-cli")
     parser.add_argument("--language", default="auto", help="spoken language code, e.g. en (default: detect)")
-    parser.add_argument("--retranscribe", action="store_true", help="run Whisper again even if a transcript exists")
+    parser.add_argument("--retranscribe", action="store_true",
+                        help="run Whisper again even if a transcript exists (without it, an existing "
+                             "transcript is reused, which re-applies the current names list)")
     args = parser.parse_args(argv)
 
     folder = args.session.expanduser().resolve() if args.session else latest_session()
@@ -104,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     print(f"Wrote {result.path}: {result.photos} photos, {result.described} with descriptions", file=sys.stderr)
+    if result.corrections:
+        print(f"Corrected: {summary(result.corrections)}", file=sys.stderr)
     return 0
 
 

@@ -16,10 +16,13 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QM
 from photo_voicenotes import positions
 from photo_voicenotes.filenames import IMAGE_SUFFIXES, find_photos, list_images
 from photo_voicenotes.models import MODELS, select_model, selected_model
+from photo_voicenotes.names_dialog import NamesDialog
 from photo_voicenotes.paths import APP_NAME, sessions_dir
 from photo_voicenotes.recorder import RecorderError, WavRecorder
 from photo_voicenotes.session import Session
-from photo_voicenotes.transcribe import CSV_NAME, CsvResult, latest_session, load_session
+from photo_voicenotes.corrections import summary
+from photo_voicenotes.transcribe import (CSV_NAME, TRANSCRIPT, CsvResult, latest_session, load_session,
+                                         session_csv)
 from photo_voicenotes.transcriber import SessionTranscriber, ensure_model
 from photo_voicenotes.whisper import WhisperError, find_model, find_whisper
 
@@ -261,13 +264,34 @@ class ViewerWindow(QWidget):
 
     def _on_transcribed(self, result: CsvResult) -> None:
         print(f"Wrote {result.path}", flush=True)
-        self._flash(f"Transcribed: {result.described} of {result.photos} photos described. "
-                    "Right-click → Export CSV… to save a copy.", ms=10000)
+        corrected = f" Corrected: {summary(result.corrections)}." if result.corrections else ""
+        self._flash(f"Transcribed: {result.described} of {result.photos} photos described.{corrected} "
+                    "Right-click → Export CSV… to save a copy.", ms=12000)
 
     def _on_transcribe_failed(self, message: str) -> None:
         self.update()
         QMessageBox.warning(self, "Transcription failed",
                             f"{message}\n\nThe recording is saved; press T to try again.")
+
+    def _edit_names(self) -> None:
+        NamesDialog(self).exec()
+
+    def _apply_names(self) -> None:
+        """Re-correct the last recording's CSV with the current names list, without Whisper."""
+        folder = self._last_session or latest_session()
+        if folder is None or not (folder / TRANSCRIPT).is_file():
+            self._flash("No transcribed recording yet")
+            return
+        if self._transcriber.busy:
+            self._flash("Wait for the transcription to finish first")
+            return
+        try:
+            result = session_csv(folder)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Could not apply names list", str(exc))
+            return
+        corrected = f"Corrected: {summary(result.corrections)}" if result.corrections else "No corrections needed."
+        self._flash(f"Names list applied to the last recording. {corrected}", ms=12000)
 
     def _export_csv(self) -> None:
         folder = self._last_session or latest_session()
@@ -341,6 +365,8 @@ class ViewerWindow(QWidget):
         menu.addAction(("Stop recording" if recording else "Start recording") + "\tR", self._toggle_recording)
         menu.addAction("Transcribe last recording\tT", self._transcribe_last)
         menu.addAction("Export CSV…\tCtrl+E", self._export_csv)
+        menu.addAction("Names and places…", self._edit_names)
+        menu.addAction("Apply names list to last recording", self._apply_names)
         models = menu.addMenu("Transcription model")
         group = QActionGroup(models)
         for model in MODELS.values():
