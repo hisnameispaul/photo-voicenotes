@@ -11,9 +11,10 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSize, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import (QActionGroup, QColor, QFont, QGuiApplication, QImage, QImageReader, QKeyEvent,
                            QPainter, QPixmap)
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QMessageBox, QWidget
 
-from photo_voicenotes.filenames import list_images
+from photo_voicenotes import positions
+from photo_voicenotes.filenames import IMAGE_SUFFIXES, find_photos, list_images
 from photo_voicenotes.models import MODELS, select_model, selected_model
 from photo_voicenotes.paths import APP_NAME, sessions_dir
 from photo_voicenotes.recorder import RecorderError, WavRecorder
@@ -23,7 +24,7 @@ from photo_voicenotes.transcriber import SessionTranscriber, ensure_model
 from photo_voicenotes.whisper import WhisperError, find_model, find_whisper
 
 PREFETCH = 2  # images kept decoded either side of the current one
-HINT = "←/→ navigate · R record · T transcribe · right-click for more"
+HINT = "←/→ navigate · G go to photo · R record · T transcribe · right-click for more"
 
 
 class ImageLoader(QObject):
@@ -85,6 +86,11 @@ class ViewerWindow(QWidget):
         self._rec_timer = QTimer(self, interval=500)
         self._rec_timer.timeout.connect(self.update)
         self._last_session: Path | None = None
+        self._last_query = ""
+
+        # Saving the position is debounced so holding an arrow key doesn't rewrite the file.
+        self._position_timer = QTimer(self, singleShot=True, interval=1000)
+        self._position_timer.timeout.connect(self._save_position)
 
         self._transcriber = SessionTranscriber(self)
         self._transcribe_percent = 0
@@ -98,7 +104,8 @@ class ViewerWindow(QWidget):
 
     # --- folder & navigation -------------------------------------------------
 
-    def open_folder(self, folder: Path) -> None:
+    def open_folder(self, folder: Path, start: Path | None = None) -> None:
+        """Show a folder at the given photo, else where it was last left, else the first."""
         if self._recorder.is_recording:
             self._flash("Stop recording before opening another folder")
             return
@@ -106,12 +113,45 @@ class ViewerWindow(QWidget):
         if not images:
             self._flash(f"No images found in {folder}")
             return
+        self._save_position()
+        names = [p.name for p in images]
+        wanted = start.name if start is not None else positions.last_viewed(folder)
         self._folder = folder
         self._images = images
+        self._index = 0
         self._cache.clear()
         self._errors.clear()
         self._scaled = None
-        self._go_to(0)
+        self._go_to(names.index(wanted) if wanted in names else 0)
+
+    def _save_position(self) -> None:
+        self._position_timer.stop()
+        if self._folder is not None and self._images:
+            try:
+                positions.remember(self._folder, self._current())
+            except OSError as exc:
+                print(f"Could not save position: {exc}", file=sys.stderr)
+
+    def _go_to_photo(self) -> None:
+        if not self._images:
+            self._flash("Open a folder of photos first")
+            return
+        query, ok = QInputDialog.getText(self, "Go to photo", "Photo number (e.g. 743) or name:",
+                                         text=self._last_query)
+        if not ok or not query.strip():
+            return
+        self._last_query = query.strip()
+        matches = find_photos(self._images, query)
+        if not matches:
+            self._flash(f"No photo matches \"{query.strip()}\"")
+            return
+        # Several photos can share a number; each G jumps to the next one after this photo.
+        after = [i for i in matches if i > self._index]
+        target = after[0] if after else matches[0]
+        self._go_to(target)
+        if len(matches) > 1:
+            self._flash(f"{len(matches)} photos match \"{query.strip()}\": showing "
+                        f"{matches.index(target) + 1} of {len(matches)}. Press G, Enter for the next.")
 
     def _choose_folder(self) -> None:
         start = str(self._folder) if self._folder else str(Path.home())
@@ -127,6 +167,7 @@ class ViewerWindow(QWidget):
         self._index = index
         if changed and self._session is not None:
             self._session.log_image(self._recorder.position(), self._current())
+        self._position_timer.start()
         self._prefetch()
         self.update()
 
@@ -272,6 +313,8 @@ class ViewerWindow(QWidget):
             self._go_to(len(self._images) - 1)
         elif key == Qt.Key.Key_R and not ctrl:
             self._toggle_recording()
+        elif key == Qt.Key.Key_G and not ctrl:
+            self._go_to_photo()
         elif key == Qt.Key.Key_T and not ctrl:
             self._transcribe_last()
         elif key == Qt.Key.Key_E and ctrl:
@@ -293,6 +336,7 @@ class ViewerWindow(QWidget):
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
         menu.addAction("Open folder…\tCtrl+O", self._choose_folder)
+        menu.addAction("Go to photo…\tG", self._go_to_photo)
         recording = self._recorder.is_recording
         menu.addAction(("Stop recording" if recording else "Start recording") + "\tR", self._toggle_recording)
         menu.addAction("Transcribe last recording\tT", self._transcribe_last)
@@ -323,6 +367,7 @@ class ViewerWindow(QWidget):
                 event.ignore()
                 return
             self._transcriber.stop()
+        self._save_position()
         self._loader.shutdown()
         super().closeEvent(event)
 
@@ -411,7 +456,8 @@ class ViewerWindow(QWidget):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=APP_NAME, description=__doc__)
-    parser.add_argument("folder", nargs="?", type=Path, help="folder of photos to open")
+    parser.add_argument("path", nargs="?", type=Path,
+                        help="folder of photos to open, or one photo to open its folder at")
     parser.add_argument("--windowed", action="store_true", help="start in a window instead of full screen")
     args = parser.parse_args(argv)
 
@@ -422,7 +468,13 @@ def main(argv: list[str] | None = None) -> int:
     QImageReader.setAllocationLimit(0)
 
     window = ViewerWindow(sessions_dir())
-    if args.folder:
-        window.open_folder(args.folder.expanduser().resolve())
+    if args.path:
+        path = args.path.expanduser().resolve()
+        if path.is_dir():
+            window.open_folder(path)
+        elif path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            window.open_folder(path.parent, start=path)
+        else:
+            parser.error(f"not a folder or a supported image: {args.path}")
     window.show() if args.windowed else window.showFullScreen()
     return app.exec()

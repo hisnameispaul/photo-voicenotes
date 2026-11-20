@@ -24,15 +24,20 @@ that order. Other image files (TIFF, JPEG, PNG) are shown after them in natural 
 Requires [uv](https://docs.astral.sh/uv/).
 
 ```sh
-uv run photo-voicenotes "/path/to/scans"            # full screen
+uv run photo-voicenotes "/path/to/scans"                        # full screen
 uv run photo-voicenotes --windowed "/path/to/scans"
+uv run photo-voicenotes "/path/to/scans/#69 2 721.tif"          # start at this photo
 ```
+
+A folder reopens at the photo you last viewed there. That position is kept in the app's
+data folder, not the photo folder.
 
 | Key | Action |
 | --- | --- |
 | → / ↓ / Space / Page Down | next photo |
 | ← / ↑ / Backspace / Page Up | previous photo |
 | Home / End | first / last photo |
+| G | go to a photo by number (e.g. `743`) or name; if several share a number, G and Enter again moves to the next |
 | R | start / stop recording (stopping starts transcription) |
 | T | transcribe the last recording again |
 | Ctrl+E | export the last recording's CSV to a location you choose |
@@ -85,16 +90,10 @@ uv run photo-voicenotes-transcribe                 # most recent session
 uv run photo-voicenotes-transcribe path/to/session --language en
 ```
 
-This writes `transcript.json` and `photos.csv` into the session folder. The CSV has one row
-per photo shown, in viewing order:
-
-| Column | |
-| --- | --- |
-| `filename`, `roll`, `frame`, `sequence` | from names like `#69 2 721.tif` |
-| `description` | what was said while the photo was on screen |
-| `people`, `place`, `date` | left blank, for you to fill in |
-| `shown_at` | when the photo appeared in `audio.wav` (m:ss), for listening back |
-| `seconds_on_screen` | total time the photo was shown |
+This writes `transcript.json` and `photos.csv` into the session folder. The CSV has two
+columns, `filename` and `description`, with one row per photo shown in viewing order;
+photos shown but not described get an empty description. When each photo was shown is kept
+in the session's `events.jsonl`.
 
 Words are matched to photos using Whisper's word timings. People often press "next"
 before finishing a sentence, so when a photo change lands mid-sentence, the rest of that

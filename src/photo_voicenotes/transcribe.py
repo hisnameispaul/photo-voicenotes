@@ -10,15 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from photo_voicenotes.align import Event, PhotoNotes, align
-from photo_voicenotes.filenames import parse_scan_name
 from photo_voicenotes.models import DownloadError, download, selected_model
 from photo_voicenotes.paths import sessions_dir
 from photo_voicenotes.whisper import WhisperError, find_model, find_whisper, read_words, transcribe
 
 TRANSCRIPT = "transcript.json"
 CSV_NAME = "photos.csv"
-CSV_COLUMNS = ["filename", "roll", "frame", "sequence", "description", "people", "place", "date",
-               "shown_at", "seconds_on_screen"]
+CSV_COLUMNS = ["filename", "description"]
 
 
 @dataclass(frozen=True)
@@ -47,27 +45,13 @@ def load_session(folder: Path) -> tuple[dict, list[Event]]:
     return metadata, events
 
 
-def _timestamp(seconds: float) -> str:
-    minutes, secs = divmod(int(seconds), 60)
-    return f"{minutes}:{secs:02d}"
-
-
 def write_csv(path: Path, notes: list[PhotoNotes]) -> None:
     # utf-8-sig so Excel recognises the encoding; LibreOffice and others ignore the marker.
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for note in notes:
-            scan = parse_scan_name(Path(note.image))
-            writer.writerow({
-                "filename": note.image,
-                "roll": scan.roll if scan else "",
-                "frame": scan.frame if scan else "",
-                "sequence": scan.sequence if scan else "",
-                "description": note.description,
-                "shown_at": _timestamp(note.first_shown),
-                "seconds_on_screen": f"{note.seconds_on_screen:.1f}",
-            })
+            writer.writerow({"filename": note.image, "description": note.description})
 
 
 def session_csv(folder: Path, output: Path | None = None) -> CsvResult:
