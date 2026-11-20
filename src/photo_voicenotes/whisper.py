@@ -16,6 +16,9 @@ from photo_voicenotes.paths import models_dir
 DEFAULT_MODEL = "ggml-large-v3-turbo-q5_0.bin"
 WHISPER_ENV = "PHOTO_VOICENOTES_WHISPER"
 MODEL_ENV = "PHOTO_VOICENOTES_MODEL"
+# Whisper copies the style of the text before it. Casual speech can start it off in lower
+# case with no punctuation, which then sticks; a punctuated example keeps it in sentences.
+STYLE_PROMPT = "OK, here's the next one. This is Mum, Dad and Gran on holiday in the summer of 1975."
 
 # A source checkout keeps its own whisper.cpp build here (see README).
 _CHECKOUT_BUILD = Path(__file__).resolve().parents[2] / "tools" / "whisper.cpp" / "build" / "bin"
@@ -63,12 +66,15 @@ def dtw_preset(model: Path) -> str | None:
     return preset if preset in known else None
 
 
-def transcribe(audio: Path, output_json: Path, model: Path, whisper: Path, language: str = "auto") -> None:
+def transcribe(audio: Path, output_json: Path, model: Path, whisper: Path, language: str = "auto",
+               prompt: str = STYLE_PROMPT) -> None:
     """Transcribe audio to whisper.cpp's full JSON format, printing progress to stderr."""
     command = [
         str(whisper), "-m", str(model), "-f", str(audio), "-l", language,
         "-ojf", "-of", str(output_json.with_suffix("")), "-pp",
     ]
+    if prompt:
+        command += ["--prompt", prompt]
     preset = dtw_preset(model)
     if preset:
         # DTW gives much more accurate word timings; it requires flash attention off.
@@ -85,15 +91,27 @@ def transcribe(audio: Path, output_json: Path, model: Path, whisper: Path, langu
         raise WhisperError("whisper-cli failed:\n" + "".join(log[-20:]))
 
 
+def _is_phantom(tokens: list[dict]) -> bool:
+    """True for text Whisper invented in silence, such as a closing "Thank you."
+
+    Word alignment can't place invented words against any actual speech, so every token
+    lands on the same instant; real speech, even two words, is always spread over time.
+    """
+    times = {t.get("t_dtw", -1) for t in tokens}
+    return len(tokens) > 1 and len(times) == 1 and -1 not in times
+
+
 def read_words(transcript_json: Path) -> list[Word]:
     """Join whisper's sub-word tokens into words, each timed by its first token."""
     data = json.loads(transcript_json.read_text(encoding="utf-8", errors="replace"))
     words: list[list] = []
     for segment in data["transcription"]:
-        for token in segment["tokens"]:
+        # Skip special tokens such as [_BEG_] and timestamps.
+        tokens = [t for t in segment["tokens"] if not t["text"].startswith("[_") and t["text"].strip()]
+        if _is_phantom(tokens):
+            continue
+        for token in tokens:
             text = token["text"]
-            if text.startswith("[_") or not text.strip():
-                continue  # special tokens such as [_BEG_] and timestamps
             dtw = token.get("t_dtw", -1)
             t = dtw / 100 if dtw >= 0 else token["offsets"]["from"] / 1000
             if text.startswith(" ") or not words:

@@ -1,8 +1,9 @@
+import json
 from pathlib import Path
 
 from photo_voicenotes.align import Event, align
 from photo_voicenotes.filenames import ScanName, parse_scan_name
-from photo_voicenotes.whisper import Word, dtw_preset
+from photo_voicenotes.whisper import Word, dtw_preset, read_words
 
 
 def words(*pairs):
@@ -15,10 +16,11 @@ def descriptions(notes):
 
 def test_word_finished_after_keypress_stays_with_previous_photo():
     events = [Event(0.0, "a.tif"), Event(3.0, "b.tif")]
-    spoken = words(("blowing", 1.5), ("his", 2.0), ("candles", 2.4), ("birthday", 3.4),
-                   ("that's", 4.7), ("dad", 5.1))
+    # Real case: "...candles for his [press] birthday. [pause] That's me, Dad..."
+    spoken = words(("blowing", 1.6), ("candles", 2.1), ("for", 2.9), ("his", 3.0),
+                   ("birthday", 3.4), ("that's", 4.7), ("dad", 5.1))
     assert descriptions(align(events, spoken, 7.0)) == {
-        "a.tif": "blowing his candles birthday", "b.tif": "that's dad"}
+        "a.tif": "blowing candles for his birthday", "b.tif": "that's dad"}
 
 
 def test_cuts_at_keypress_when_there_is_no_pause():
@@ -61,3 +63,25 @@ def test_dtw_preset_from_model_filename():
     assert dtw_preset(Path("ggml-large-v3-turbo-q5_0.bin")) == "large.v3.turbo"
     assert dtw_preset(Path("ggml-base.en.bin")) == "base.en"
     assert dtw_preset(Path("my-custom-model.bin")) is None
+
+
+def test_prefers_pause_at_keypress_over_bigger_pause_belonging_to_next_photo():
+    # Real case: "...me and Gran. [press] Same again. [press] That's nursery"
+    events = [Event(0.0, "a.tif"), Event(17.68, "b.tif"), Event(19.55, "c.tif")]
+    spoken = words(("me", 16.86), ("and", 17.06), ("Gran.", 17.40), ("Same", 18.82),
+                   ("again.", 19.10), ("That's", 21.48), ("nursery.", 22.0))
+    assert descriptions(align(events, spoken, 24.0)) == {
+        "a.tif": "me and Gran.", "b.tif": "Same again.", "c.tif": "That's nursery."}
+
+
+def test_read_words_drops_text_invented_in_silence(tmp_path):
+    def token(text, centiseconds):
+        return {"text": text, "t_dtw": centiseconds, "offsets": {"from": centiseconds * 10}}
+
+    transcript = {"transcription": [
+        {"tokens": [token("[_BEG_]", 7200), token(" Same", 7256), token(" again", 7288), token(".", 7494)]},
+        {"tokens": [token(" Thank", 7916), token(" you", 7916), token(".", 7916)]},
+    ]}
+    path = tmp_path / "transcript.json"
+    path.write_text(json.dumps(transcript))
+    assert [(w.text, w.t) for w in read_words(path)] == [("Same", 72.56), ("again.", 72.88)]

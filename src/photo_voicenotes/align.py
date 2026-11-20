@@ -1,8 +1,10 @@
 """Matching transcribed words to the photo that was on screen when they were spoken.
 
 People tend to press "next" just before finishing a sentence, and pause before describing
-the new photo. So each photo change is moved to the longest pause between words near the
-keypress, rather than cutting at the exact keypress time.
+the new photo. So each photo change is moved to a pause between words near the keypress,
+rather than cutting at the exact keypress time. Longer pauses win, but a pause further
+from the keypress must be correspondingly longer, so the pause belonging to the next
+photo change isn't picked by mistake.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ class PhotoNotes:
 
 def _split_index(times: list[float], t: float, lo: int, duration: float) -> int:
     """Index of the first word belonging to the photo shown at keypress time t."""
-    best, best_gap = None, MIN_PAUSE
+    best, best_score = None, 0.0
     for k in range(lo, len(times) + 1):
         # Silence at the start or end of the recording counts as a pause of its real length.
         prev = times[k - 1] if k > 0 else 0.0
@@ -53,8 +55,12 @@ def _split_index(times: list[float], t: float, lo: int, duration: float) -> int:
             break
         if nxt < t - SNAP_BEFORE:
             continue
-        if nxt - prev > best_gap:
-            best, best_gap = k, nxt - prev
+        gap = nxt - prev
+        if gap < MIN_PAUSE:
+            continue
+        score = gap - max(0.0, prev - t, t - nxt)  # minus the pause's distance from the keypress
+        if best is None or score > best_score:
+            best, best_score = k, score
     if best is None:  # no clear pause: cut at the keypress
         best = max(lo, bisect.bisect_left(times, t))
     return best
