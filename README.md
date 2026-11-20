@@ -4,14 +4,15 @@ Catalogue old scanned photos by talking about them.
 
 Open a folder of scans in a full-screen viewer, press **R**, and describe each photo
 (who, where, roughly when) as you flip through with the arrow keys. The app records the
-narration and logs which photo was on screen at each moment. Later it transcribes the audio
-locally with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and turns it into a
-CSV with one row per photo, so nobody has to read filenames aloud.
+narration and logs which photo was on screen at each moment. When you stop recording it
+transcribes the audio locally with [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+and turns it into a CSV with one row per photo, so nobody has to read filenames aloud.
 
-Everything runs locally and offline.
+Everything runs on your computer. The only time the app uses the internet is a one-off
+download of the speech-recognition model, which it asks about first.
 
-> **Status:** early development. Recording, transcription and CSV export work from the
-> command line; automatic model download and packaged builds are still to come.
+> **Status:** early development. Recording, transcription and CSV export work; packaged
+> builds are still to come, so for now whisper.cpp has to be built separately (see below).
 
 ## Filenames
 
@@ -32,10 +33,18 @@ uv run photo-voicenotes --windowed "/path/to/scans"
 | → / ↓ / Space / Page Down | next photo |
 | ← / ↑ / Backspace / Page Up | previous photo |
 | Home / End | first / last photo |
-| R | start / stop recording |
+| R | start / stop recording (stopping starts transcription) |
+| T | transcribe the last recording again |
+| Ctrl+E | export the last recording's CSV to a location you choose |
 | Ctrl+O | open a folder |
 | F11 or F | toggle full screen (Esc leaves it) |
 | Q | quit (stops and saves any recording) |
+
+Right-click anywhere for a menu with the same actions, plus the choice of transcription
+model:
+
+- **Accurate** (large-v3-turbo, 574 MB, the default): best results; fast with a graphics card.
+- **Fast** (small, 190 MB): for slower computers; less reliable with names.
 
 Each recording is saved as a session folder in the app's data directory
 (`~/.local/share/photo-voicenotes/sessions/` on Linux):
@@ -47,7 +56,13 @@ Each recording is saved as a session folder in the app's data directory
 
 Your photos are never modified or copied.
 
-## Transcribing a session
+## Transcription
+
+When a recording stops, the app transcribes it in the background (progress shows in the
+top-left corner) and writes `photos.csv` into the session folder. The first time, it offers
+to download the selected model into the app's `models/` data folder
+(`~/.local/share/photo-voicenotes/models/` on Linux); the download is checked against a
+known checksum.
 
 Transcription uses whisper.cpp's `whisper-cli`. Until packaged builds exist, build it
 yourself (Vulkan works on AMD, Intel and NVIDIA GPUs; drop `-DGGML_VULKAN=ON` for CPU only):
@@ -62,10 +77,8 @@ On Fedora the Vulkan build needs `glslc` and `spirv-headers-devel`. A build in
 `tools/whisper.cpp` is found automatically; otherwise put `whisper-cli` on your `PATH` or
 set `PHOTO_VOICENOTES_WHISPER`.
 
-Download a model, e.g.
-[ggml-large-v3-turbo-q5_0.bin](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin),
-into the app's `models/` data folder (`~/.local/share/photo-voicenotes/models/` on Linux), or
-pass `--model`. Then:
+Sessions can also be transcribed from the command line, which downloads the model too if
+needed (or pass `--model` to use a different ggml model file):
 
 ```sh
 uv run photo-voicenotes-transcribe                 # most recent session
@@ -83,10 +96,12 @@ per photo shown, in viewing order:
 | `shown_at` | when the photo appeared in `audio.wav` (m:ss), for listening back |
 | `seconds_on_screen` | total time the photo was shown |
 
-Words are matched to photos using Whisper's word timings. Because people often press
-"next" just before finishing a sentence and then pause, each photo change is moved to the
-longest pause within about half a second before to 1.5 seconds after the keypress. Photos
-shown for under 0.8 seconds count as flipped past and get no description. A photo visited
+Words are matched to photos using Whisper's word timings. People often press "next"
+before finishing a sentence, so when a photo change lands mid-sentence, the rest of that
+sentence (up to the first full stop or comma, within 1.5 seconds) stays with the photo it
+started on. Without punctuation to go by, the change moves to the clearest pause near the
+keypress instead. Photos shown for under 0.8 seconds count as flipped past and get no
+description. A photo visited
 more than once gets its descriptions joined with ` / `.
 
 Re-running reuses the saved transcript; pass `--retranscribe` to run Whisper again.

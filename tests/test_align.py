@@ -81,7 +81,34 @@ def test_read_words_drops_text_invented_in_silence(tmp_path):
     transcript = {"transcription": [
         {"tokens": [token("[_BEG_]", 7200), token(" Same", 7256), token(" again", 7288), token(".", 7494)]},
         {"tokens": [token(" Thank", 7916), token(" you", 7916), token(".", 7916)]},
+        # Same, but with the full stop placed a moment later.
+        {"tokens": [token(" Thank", 10200), token(" you", 10200), token(".", 10228)]},
     ]}
     path = tmp_path / "transcript.json"
     path.write_text(json.dumps(transcript))
     assert [(w.text, w.t) for w in read_words(path)] == [("Same", 72.56), ("again.", 72.88)]
+
+
+def test_read_words_drops_lone_punctuation(tmp_path):
+    transcript = {"transcription": [
+        {"tokens": [{"text": " .", "t_dtw": 94, "offsets": {"from": 940}}]},
+        {"tokens": [{"text": " Uncle", "t_dtw": 300, "offsets": {"from": 3000}},
+                    {"text": " Peter", "t_dtw": 340, "offsets": {"from": 3400}},
+                    {"text": " .", "t_dtw": 380, "offsets": {"from": 3800}}]},
+    ]}
+    path = tmp_path / "transcript.json"
+    path.write_text(json.dumps(transcript))
+    assert [(w.text, w.t) for w in read_words(path)] == [("Uncle", 3.0), ("Peter.", 3.4)]
+
+
+def test_sentence_unfinished_at_keypress_stays_with_photo_it_started_on():
+    # Real case: "...at a playground, [press] me on a [press] slide, Peter. [press]"
+    # The pause before "slide," is the biggest, but the sentence runs to the comma.
+    events = [Event(0.0, "027.tif"), Event(47.90, "028.tif"), Event(50.19, "029.tif"),
+              Event(51.87, "030.tif")]
+    spoken = words(("at", 47.10), ("a", 47.20), ("playground,", 47.80), ("me", 49.09),
+                   ("on", 49.29), ("a", 49.39), ("slide,", 50.49), ("Peter.", 51.69),
+                   ("Bunch", 53.0), ("of", 53.2), ("kids.", 53.5))
+    assert descriptions(align(events, spoken, 56.0)) == {
+        "027.tif": "at a playground,", "028.tif": "me on a slide,", "029.tif": "Peter.",
+        "030.tif": "Bunch of kids."}

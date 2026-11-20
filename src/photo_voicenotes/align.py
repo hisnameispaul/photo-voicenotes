@@ -1,10 +1,12 @@
 """Matching transcribed words to the photo that was on screen when they were spoken.
 
-People tend to press "next" just before finishing a sentence, and pause before describing
-the new photo. So each photo change is moved to a pause between words near the keypress,
-rather than cutting at the exact keypress time. Longer pauses win, but a pause further
-from the keypress must be correspondingly longer, so the pause belonging to the next
-photo change isn't picked by mistake.
+People tend to press "next" before finishing a sentence. So when a photo change lands
+mid-sentence, the rest of the sentence, up to the first full stop or comma, stays with the
+photo it started on.
+
+If there is no punctuation to go by, the change is moved to a pause between words near the
+keypress instead. Longer pauses win, but a pause further from the keypress must be
+correspondingly longer, so the pause belonging to the next photo change isn't picked.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from dataclasses import dataclass, field
 
 from photo_voicenotes.whisper import Word
 
-# Window around each keypress in which to look for the pause, in seconds.
+# Window around each keypress in which to look for the end of a sentence or a pause, in seconds.
 SNAP_BEFORE = 0.5
 SNAP_AFTER = 1.5
 # Gaps shorter than this are ordinary spacing between words, not a pause.
@@ -24,6 +26,7 @@ MIN_PAUSE = 0.5
 MIN_VIEW = 0.8
 
 _FILLERS = re.compile(r"^(uh+|um+|er+m?|hmm+|mm+)[.,!?]*$", re.IGNORECASE)
+_BREAK = (".", "!", "?", ",", ";", ":", "…")
 
 
 @dataclass(frozen=True)
@@ -44,8 +47,23 @@ class PhotoNotes:
         return " / ".join(self.parts)
 
 
-def _split_index(times: list[float], t: float, lo: int, duration: float) -> int:
+def _split_index(words: list[Word], t: float, lo: int, duration: float) -> int:
     """Index of the first word belonging to the photo shown at keypress time t."""
+    times = [w.t for w in words]
+    at_keypress = max(lo, bisect.bisect_left(times, t))
+    if lo < at_keypress < len(words):
+        if words[at_keypress - 1].text.endswith(_BREAK):
+            return at_keypress  # the sentence was finished before the keypress
+        # Mid-sentence: the words up to the next full stop or comma stay with the old photo.
+        for k in range(at_keypress, len(words)):
+            if times[k] > t + SNAP_AFTER:
+                break
+            if words[k].text.endswith(_BREAK):
+                return k + 1
+    return _split_at_pause(times, t, lo, duration)
+
+
+def _split_at_pause(times: list[float], t: float, lo: int, duration: float) -> int:
     best, best_score = None, 0.0
     for k in range(lo, len(times) + 1):
         # Silence at the start or end of the recording counts as a pause of its real length.
@@ -80,10 +98,9 @@ def align(events: list[Event], words: list[Word], duration: float) -> list[Photo
 
     # Only photos looked at long enough to be described take part in the matching.
     viewed = [e for e, end in zip(events, ends) if end - e.t >= MIN_VIEW]
-    times = [w.t for w in words]
     splits = [0]
     for event in viewed[1:]:
-        splits.append(_split_index(times, event.t, splits[-1], duration))
+        splits.append(_split_index(words, event.t, splits[-1], duration))
     splits.append(len(words))
 
     for event, start, stop in zip(viewed, splits, splits[1:]):

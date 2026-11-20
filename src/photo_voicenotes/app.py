@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QKeyEvent, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
+from PySide6.QtCore import QObject, QSize, QStandardPaths, Qt, QTimer, Signal
+from PySide6.QtGui import (QActionGroup, QColor, QFont, QGuiApplication, QImage, QImageReader, QKeyEvent,
+                           QPainter, QPixmap)
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QWidget
 
 from photo_voicenotes.filenames import list_images
+from photo_voicenotes.models import MODELS, select_model, selected_model
 from photo_voicenotes.paths import APP_NAME, sessions_dir
 from photo_voicenotes.recorder import RecorderError, WavRecorder
 from photo_voicenotes.session import Session
+from photo_voicenotes.transcribe import CSV_NAME, CsvResult, latest_session, load_session
+from photo_voicenotes.transcriber import SessionTranscriber, ensure_model
+from photo_voicenotes.whisper import WhisperError, find_model, find_whisper
 
 PREFETCH = 2  # images kept decoded either side of the current one
-HINT = "←/→ navigate · R record · Ctrl+O open folder · F11 full screen · Q quit"
+HINT = "←/→ navigate · R record · T transcribe · right-click for more"
 
 
 class ImageLoader(QObject):
@@ -78,6 +84,13 @@ class ViewerWindow(QWidget):
         self._session: Session | None = None
         self._rec_timer = QTimer(self, interval=500)
         self._rec_timer.timeout.connect(self.update)
+        self._last_session: Path | None = None
+
+        self._transcriber = SessionTranscriber(self)
+        self._transcribe_percent = 0
+        self._transcriber.progress.connect(self._on_transcribe_progress)
+        self._transcriber.finished.connect(self._on_transcribed)
+        self._transcriber.failed.connect(self._on_transcribe_failed)
 
         self._message = ""
         self._message_timer = QTimer(self, singleShot=True)
@@ -169,12 +182,69 @@ class ViewerWindow(QWidget):
     def _stop_recording(self) -> None:
         duration = self._recorder.stop()
         self._rec_timer.stop()
-        if self._session is not None:
-            self._session.close(duration)
-            print(f"Saved session: {self._session.folder}", flush=True)
-            self._flash(f"Saved {duration:.0f}s recording to {self._session.folder}", ms=8000)
-            self._session = None
+        session, self._session = self._session, None
         self.update()
+        if session is not None:
+            session.close(duration)
+            print(f"Saved session: {session.folder}", flush=True)
+            self._last_session = session.folder
+            self._transcribe(session.folder)
+
+    # --- transcription & export ----------------------------------------------
+
+    def _transcribe(self, folder: Path) -> None:
+        try:
+            whisper, model = find_whisper(), find_model()
+        except WhisperError as exc:
+            QMessageBox.warning(self, "Cannot transcribe",
+                                f"{exc}\n\nThe recording is saved; press T to transcribe it later.")
+            return
+        if not model.is_file() and not ensure_model(self, selected_model()):
+            self._flash("Recording saved but not transcribed. Press T to try again.", ms=8000)
+            return
+        self._transcriber.enqueue(folder, whisper, model)
+        self.update()
+
+    def _transcribe_last(self) -> None:
+        folder = self._last_session or latest_session()
+        if self._recorder.is_recording:
+            self._flash("Stop recording first")
+        elif folder is None:
+            self._flash("No recordings yet")
+        else:
+            self._transcribe(folder)
+
+    def _on_transcribe_progress(self, percent: int) -> None:
+        self._transcribe_percent = percent
+        self.update()
+
+    def _on_transcribed(self, result: CsvResult) -> None:
+        print(f"Wrote {result.path}", flush=True)
+        self._flash(f"Transcribed: {result.described} of {result.photos} photos described. "
+                    "Right-click → Export CSV… to save a copy.", ms=10000)
+
+    def _on_transcribe_failed(self, message: str) -> None:
+        self.update()
+        QMessageBox.warning(self, "Transcription failed",
+                            f"{message}\n\nThe recording is saved; press T to try again.")
+
+    def _export_csv(self) -> None:
+        folder = self._last_session or latest_session()
+        if folder is None or not (folder / CSV_NAME).is_file():
+            self._flash("No transcribed recording to export yet")
+            return
+        metadata, _ = load_session(folder)
+        documents = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+        suggested = documents / f"{Path(metadata['image_folder']).name} {folder.name}.csv"
+        chosen, _ = QFileDialog.getSaveFileName(self, "Export CSV", str(suggested), "CSV files (*.csv)")
+        if not chosen:
+            return
+        try:
+            shutil.copyfile(folder / CSV_NAME, chosen)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self._flash(f"Exported to {chosen}", ms=6000)
 
     # --- messages ------------------------------------------------------------
 
@@ -202,10 +272,14 @@ class ViewerWindow(QWidget):
             self._go_to(len(self._images) - 1)
         elif key == Qt.Key.Key_R and not ctrl:
             self._toggle_recording()
+        elif key == Qt.Key.Key_T and not ctrl:
+            self._transcribe_last()
+        elif key == Qt.Key.Key_E and ctrl:
+            self._export_csv()
         elif key == Qt.Key.Key_O and ctrl:
             self._choose_folder()
         elif key in (Qt.Key.Key_F11, Qt.Key.Key_F):
-            self.showNormal() if self.isFullScreen() else self.showFullScreen()
+            self._toggle_full_screen()
         elif key == Qt.Key.Key_Escape and self.isFullScreen():
             self.showNormal()
         elif key == Qt.Key.Key_Q or (key == Qt.Key.Key_W and ctrl):
@@ -213,9 +287,42 @@ class ViewerWindow(QWidget):
         else:
             super().keyPressEvent(event)
 
+    def _toggle_full_screen(self) -> None:
+        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        menu.addAction("Open folder…\tCtrl+O", self._choose_folder)
+        recording = self._recorder.is_recording
+        menu.addAction(("Stop recording" if recording else "Start recording") + "\tR", self._toggle_recording)
+        menu.addAction("Transcribe last recording\tT", self._transcribe_last)
+        menu.addAction("Export CSV…\tCtrl+E", self._export_csv)
+        models = menu.addMenu("Transcription model")
+        group = QActionGroup(models)
+        for model in MODELS.values():
+            action = models.addAction(f"{model.label} ({model.size_mb} MB)")
+            action.setCheckable(True)
+            action.setChecked(model.key == selected_model().key)
+            action.triggered.connect(lambda _checked=False, key=model.key: select_model(key))
+            group.addAction(action)
+        menu.addSeparator()
+        menu.addAction(("Leave full screen" if self.isFullScreen() else "Full screen") + "\tF11",
+                       self._toggle_full_screen)
+        menu.addAction("Quit\tQ", self.close)
+        menu.exec(event.globalPos())
+
     def closeEvent(self, event) -> None:
         if self._recorder.is_recording:
             self._stop_recording()
+        if self._transcriber.busy:
+            answer = QMessageBox.question(
+                self, "Transcription in progress",
+                "A recording is still being transcribed. Quit anyway?\n\n"
+                "The recording is kept; you can transcribe it later with T.")
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._transcriber.stop()
         self._loader.shutdown()
         super().closeEvent(event)
 
@@ -241,8 +348,12 @@ class ViewerWindow(QWidget):
 
         if self._recorder.is_recording:
             self._draw_recording(painter)
-        elif self._message:
-            self._draw_status(painter, self._message, top=True)
+        if self._transcriber.busy:
+            queued = self._transcriber.pending - 1
+            extra = f" (+{queued} waiting)" if queued else ""
+            self._draw_badge(painter, f"Transcribing… {self._transcribe_percent}%{extra}")
+        if self._message:
+            self._draw_status(painter, self._message, message=True)
         painter.end()
 
     def _scaled_pixmap(self, path: Path) -> QPixmap:
@@ -261,18 +372,27 @@ class ViewerWindow(QWidget):
         painter.setFont(QFont(self.font().family(), 16))
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
-    def _draw_status(self, painter: QPainter, text: str, top: bool = False) -> None:
+    def _draw_status(self, painter: QPainter, text: str, message: bool = False) -> None:
+        """The status bar along the bottom, or a message bar just above it."""
         painter.setFont(QFont(self.font().family(), 11))
         metrics = painter.fontMetrics()
         height = metrics.height() + 12
-        y = 0 if top else self.height() - height
+        y = self.height() - height * (2 if message else 1)
         painter.fillRect(0, y, self.width(), height, QColor(0, 0, 0, 160))
         painter.setPen(QColor(220, 220, 220))
         painter.drawText(12, y + 6 + metrics.ascent(), text)
-        if not top:
+        if not message:
             painter.setPen(QColor(140, 140, 140))
             hint_width = metrics.horizontalAdvance(HINT)
             painter.drawText(self.width() - hint_width - 12, y + 6 + metrics.ascent(), HINT)
+
+    def _draw_badge(self, painter: QPainter, text: str) -> None:
+        painter.setFont(QFont(self.font().family(), 12))
+        metrics = painter.fontMetrics()
+        width, height = metrics.horizontalAdvance(text) + 24, metrics.height() + 14
+        painter.fillRect(16, 16, width, height, QColor(0, 0, 0, 180))
+        painter.setPen(QColor(230, 230, 230))
+        painter.drawText(28, 23 + metrics.ascent(), text)
 
     def _draw_recording(self, painter: QPainter) -> None:
         seconds = int(self._recorder.position())
