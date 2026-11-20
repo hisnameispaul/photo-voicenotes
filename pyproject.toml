@@ -1,0 +1,25 @@
+[project]
+name = "photo-voicenotes"
+version = "0.1.0"
+description = "Catalogue scanned photos by talking about them: a viewer that records narration and matches it to each image."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6-Essentials>=6.8",
+    "PySide6-Addons>=6.8",  # QtMultimedia (microphone recording)
+]
+
+[project.scripts]
+photo-voicenotes = "photo_voicenotes.app:main"
+photo-voicenotes-transcribe = "photo_voicenotes.transcribe:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

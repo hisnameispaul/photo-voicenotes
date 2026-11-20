@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Local, never committed: whisper.cpp build, models, personal recordings/photos
+/tools/
+/models/
+/local/
+*.wav
+*.tif
+*.tiff
